@@ -1,0 +1,245 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import numpy as np
+from scipy.signal import hilbert
+import matplotlib.pyplot as plt
+import csv
+
+# -----------------------------
+# Signal Processing Functions
+# -----------------------------
+
+def generate_am_signal(Am, Ac, fm, fc, mu):
+    t = np.linspace(0, 0.02, 5000)
+
+    message = Am * np.cos(2 * np.pi * fm * t)
+    carrier = Ac * np.cos(2 * np.pi * fc * t)
+
+    am_signal = Ac * (1 + mu * message / Am) * np.cos(2 * np.pi * fc * t)
+
+    return t, message, carrier, am_signal
+
+
+def demodulate_signal(am_signal):
+    analytic = hilbert(am_signal)
+    envelope = np.abs(analytic)
+    recovered = envelope - np.mean(envelope)
+    return envelope, recovered
+
+
+def compute_fft(signal, fs):
+    N = len(signal)
+    fft_values = np.fft.fft(signal)
+    freqs = np.fft.fftfreq(N, 1 / fs)
+
+    positive = freqs >= 0
+
+    return freqs[positive], np.abs(fft_values[positive]) / N
+
+
+# -----------------------------
+# GUI Application
+# -----------------------------
+
+class AMSimulator:
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("AM Modulation & Demodulation Simulator")
+        self.root.geometry("700x600")
+
+        self.create_widgets()
+
+    def create_widgets(self):
+
+        title = tk.Label(
+            self.root,
+            text="AM Modulation & Demodulation Simulator",
+            font=("Arial", 16, "bold")
+        )
+        title.pack(pady=10)
+
+        frame = ttk.Frame(self.root)
+        frame.pack(pady=10)
+
+        labels = [
+            "Message Amplitude (Am)",
+            "Carrier Amplitude (Ac)",
+            "Message Frequency fm (Hz)",
+            "Carrier Frequency fc (Hz)",
+            "Modulation Index μ"
+        ]
+
+        defaults = [1, 5, 100, 1000, 0.8]
+
+        self.entries = []
+
+        for i, label in enumerate(labels):
+            ttk.Label(frame, text=label).grid(row=i, column=0, padx=10, pady=5)
+
+            entry = ttk.Entry(frame, width=15)
+            entry.insert(0, str(defaults[i]))
+            entry.grid(row=i, column=1)
+
+            self.entries.append(entry)
+
+        button_frame = ttk.Frame(self.root)
+        button_frame.pack(pady=20)
+
+        ttk.Button(
+            button_frame,
+            text="Generate & Plot",
+            command=self.run_simulation
+        ).grid(row=0, column=0, padx=10)
+
+        ttk.Button(
+            button_frame,
+            text="FFT Analysis",
+            command=self.plot_fft
+        ).grid(row=0, column=1, padx=10)
+
+        ttk.Button(
+            button_frame,
+            text="Save CSV",
+            command=self.save_csv
+        ).grid(row=0, column=2, padx=10)
+
+        ttk.Button(
+            button_frame,
+            text="Exit",
+            command=self.root.quit
+        ).grid(row=0, column=3, padx=10)
+
+        self.result_label = tk.Label(
+            self.root,
+            text="",
+            font=("Arial", 11)
+        )
+        self.result_label.pack(pady=10)
+
+        self.t = None
+        self.message = None
+        self.carrier = None
+        self.am_signal = None
+        self.recovered = None
+
+    def get_values(self):
+
+        Am = float(self.entries[0].get())
+        Ac = float(self.entries[1].get())
+        fm = float(self.entries[2].get())
+        fc = float(self.entries[3].get())
+        mu = float(self.entries[4].get())
+
+        return Am, Ac, fm, fc, mu
+
+    def run_simulation(self):
+
+        try:
+
+            Am, Ac, fm, fc, mu = self.get_values()
+
+            self.t, self.message, self.carrier, self.am_signal = \
+                generate_am_signal(Am, Ac, fm, fc, mu)
+
+            envelope, self.recovered = demodulate_signal(self.am_signal)
+
+            bandwidth = 2 * fm
+
+            self.result_label.config(
+                text=f"Bandwidth = {bandwidth:.2f} Hz"
+            )
+
+            fig, axs = plt.subplots(4, 1, figsize=(10, 8))
+
+            axs[0].plot(self.t, self.message)
+            axs[0].set_title("Message Signal")
+
+            axs[1].plot(self.t, self.carrier)
+            axs[1].set_title("Carrier Signal")
+
+            axs[2].plot(self.t, self.am_signal)
+            axs[2].set_title("AM Modulated Signal")
+
+            axs[3].plot(self.t, self.recovered)
+            axs[3].set_title("Recovered Signal")
+
+            for ax in axs:
+                ax.grid(True)
+
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def plot_fft(self):
+
+        if self.am_signal is None:
+            messagebox.showwarning(
+                "Warning",
+                "Generate signal first!"
+            )
+            return
+
+        fs = len(self.t) / (self.t[-1] - self.t[0])
+
+        freq, mag = compute_fft(self.am_signal, fs)
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(freq, mag)
+        plt.title("FFT Spectrum of AM Signal")
+        plt.xlabel("Frequency (Hz)")
+        plt.ylabel("Magnitude")
+        plt.grid(True)
+        plt.show()
+
+    def save_csv(self):
+
+        if self.am_signal is None:
+            messagebox.showwarning(
+                "Warning",
+                "Generate signal first!"
+            )
+            return
+
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv")]
+        )
+
+        if not filename:
+            return
+
+        with open(filename, "w", newline="") as f:
+
+            writer = csv.writer(f)
+
+            writer.writerow(
+                ["Time", "Message", "Carrier",
+                 "AM Signal", "Recovered"]
+            )
+
+            for i in range(len(self.t)):
+                writer.writerow([
+                    self.t[i],
+                    self.message[i],
+                    self.carrier[i],
+                    self.am_signal[i],
+                    self.recovered[i]
+                ])
+
+        messagebox.showinfo(
+            "Saved",
+            "Signal data saved successfully!"
+        )
+
+
+# -----------------------------
+# Main
+# -----------------------------
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AMSimulator(root)
+    root.mainloop()
