@@ -1,245 +1,880 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import numpy as np
-from scipy.signal import hilbert
-import matplotlib.pyplot as plt
+"""
+=============================================================================
+  Amplitude Modulation (AM) & Demodulation Simulator
+  Author  : Electronics & Communication Engineering Simulator
+  Purpose : Academic demonstration tool for AM modulation / demodulation
+  License : MIT
+=============================================================================
+
+Equation :
+    s(t) = Ac * [1 + μ * cos(2π*fm*t)] * cos(2π*fc*t)
+
+    where
+        Ac  – Carrier amplitude
+        μ   – Modulation index  (0 < μ ≤ 1 for standard AM)
+        fm  – Message / modulating frequency  (Hz)
+        fc  – Carrier frequency               (Hz)
+=============================================================================
+"""
+
+# ── Standard library ─────────────────────────────────────────────────────────
+import os
 import csv
+import traceback
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
 
-# -----------------------------
-# Signal Processing Functions
-# -----------------------------
+# ── Scientific / plotting ─────────────────────────────────────────────────────
+import numpy as np
+from scipy.signal import butter, filtfilt           # for low-pass filter
+import matplotlib
+matplotlib.use("TkAgg")                            # backend must be set before pyplot
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
 
-def generate_am_signal(Am, Ac, fm, fc, mu):
-    t = np.linspace(0, 0.02, 5000)
+# ─────────────────────────────────────────────────────────────────────────────
+#  Colour palette & shared style constants
+# ─────────────────────────────────────────────────────────────────────────────
+DARK_BG   = "#0d1117"      # near-black background
+CARD_BG   = "#161b22"      # slightly lighter card background
+BORDER    = "#30363d"      # subtle border colour
+ACCENT1   = "#58a6ff"      # blue  – carrier
+ACCENT2   = "#3fb950"      # green – message
+ACCENT3   = "#f78166"      # red-orange – modulated / envelope
+ACCENT4   = "#d2a8ff"      # lavender – recovered
+TEXT_PRI  = "#e6edf3"      # primary text
+TEXT_SEC  = "#8b949e"      # secondary / muted text
+HIGHLIGHT = "#1f6feb"      # button / active highlight
 
-    message = Am * np.cos(2 * np.pi * fm * t)
-    carrier = Ac * np.cos(2 * np.pi * fc * t)
-
-    am_signal = Ac * (1 + mu * message / Am) * np.cos(2 * np.pi * fc * t)
-
-    return t, message, carrier, am_signal
-
-
-def demodulate_signal(am_signal):
-    analytic = hilbert(am_signal)
-    envelope = np.abs(analytic)
-    recovered = envelope - np.mean(envelope)
-    return envelope, recovered
-
-
-def compute_fft(signal, fs):
-    N = len(signal)
-    fft_values = np.fft.fft(signal)
-    freqs = np.fft.fftfreq(N, 1 / fs)
-
-    positive = freqs >= 0
-
-    return freqs[positive], np.abs(fft_values[positive]) / N
+PLOT_STYLE = {
+    "figure.facecolor"  : CARD_BG,
+    "axes.facecolor"    : "#0d1117",
+    "axes.edgecolor"    : BORDER,
+    "axes.labelcolor"   : TEXT_PRI,
+    "axes.titlecolor"   : TEXT_PRI,
+    "xtick.color"       : TEXT_SEC,
+    "ytick.color"       : TEXT_SEC,
+    "grid.color"        : "#21262d",
+    "grid.linestyle"    : "--",
+    "grid.alpha"        : 0.6,
+    "legend.facecolor"  : CARD_BG,
+    "legend.edgecolor"  : BORDER,
+    "legend.labelcolor" : TEXT_PRI,
+    "text.color"        : TEXT_PRI,
+    "lines.linewidth"   : 1.6,
+}
+plt.rcParams.update(PLOT_STYLE)
 
 
-# -----------------------------
-# GUI Application
-# -----------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#  Signal Engine  (pure-NumPy maths, no GUI dependency)
+# ─────────────────────────────────────────────────────────────────────────────
+class SignalEngine:
+    """
+    Generates AM signals and performs envelope-detection demodulation.
+    All computations are vectorised with NumPy for speed.
+    """
 
-class AMSimulator:
+    SAMPLE_RATE = 100_000          # samples per second (100 kHz)
+    DURATION    = 0.05             # seconds of signal to display
 
-    def __init__(self, root):
-        self.root = root
-        self.root.title("AM Modulation & Demodulation Simulator")
-        self.root.geometry("700x600")
+    def __init__(self):
+        self.t = np.linspace(0, self.DURATION,
+                             int(self.SAMPLE_RATE * self.DURATION),
+                             endpoint=False)
 
-        self.create_widgets()
+    # ── Signal generation ────────────────────────────────────────────────────
 
-    def create_widgets(self):
+    def message_signal(self, Am: float, fm: float) -> np.ndarray:
+        """m(t) = Am * cos(2π*fm*t)"""
+        return Am * np.cos(2 * np.pi * fm * self.t)
 
-        title = tk.Label(
-            self.root,
-            text="AM Modulation & Demodulation Simulator",
-            font=("Arial", 16, "bold")
-        )
-        title.pack(pady=10)
+    def carrier_signal(self, Ac: float, fc: float) -> np.ndarray:
+        """c(t) = Ac * cos(2π*fc*t)"""
+        return Ac * np.cos(2 * np.pi * fc * self.t)
 
-        frame = ttk.Frame(self.root)
-        frame.pack(pady=10)
+    def am_signal(self, Am: float, Ac: float, fm: float,
+                  fc: float, mu: float) -> np.ndarray:
+        """
+        s(t) = Ac * [1 + μ * cos(2π*fm*t)] * cos(2π*fc*t)
+        Note: μ = Am/Ac for natural AM, but we expose μ directly as a control.
+        """
+        message = np.cos(2 * np.pi * fm * self.t)   # normalised message
+        carrier = np.cos(2 * np.pi * fc * self.t)
+        return Ac * (1 + mu * message) * carrier
 
-        labels = [
-            "Message Amplitude (Am)",
-            "Carrier Amplitude (Ac)",
-            "Message Frequency fm (Hz)",
-            "Carrier Frequency fc (Hz)",
-            "Modulation Index μ"
+    # ── Demodulation ─────────────────────────────────────────────────────────
+
+    def envelope_detect(self, am_sig: np.ndarray,
+                        fc: float) -> np.ndarray:
+        """
+        Full-wave rectification followed by a 2nd-order Butterworth low-pass
+        filter.  Cut-off frequency is set to 10× the carrier frequency but
+        clamped below Nyquist.
+        """
+        rectified = np.abs(am_sig)
+        # Cut-off: just above the message band, well below carrier
+        cutoff = min(fc * 0.5, self.SAMPLE_RATE * 0.4)
+        cutoff = max(cutoff, 100)          # at least 100 Hz
+        b, a = butter(4, cutoff / (self.SAMPLE_RATE / 2), btype="low")
+        envelope = filtfilt(b, a, rectified)
+        return envelope
+
+    def recovered_message(self, envelope: np.ndarray) -> np.ndarray:
+        """
+        Remove DC offset from the detected envelope to recover the message.
+        """
+        return envelope - np.mean(envelope)
+
+    # ── Power analysis ───────────────────────────────────────────────────────
+
+    def compute_power(self, Ac: float, mu: float):
+        """
+        For standard AM:
+            Pc  = Ac² / 2
+            Ps  = (μ²/4) * Ac²     (each sideband = half of this)
+            Pt  = Pc * (1 + μ²/2)
+        """
+        Pc  = (Ac ** 2) / 2.0
+        Ps  = (mu ** 2 / 2.0) * Pc       # total sideband power
+        Pt  = Pc + Ps
+        return Pt, Pc, Ps
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Main Application Window
+# ─────────────────────────────────────────────────────────────────────────────
+class AMSimulator(tk.Tk):
+    """
+    Top-level Tkinter application for the AM Modulation & Demodulation
+    Simulator.  Uses a Notebook widget to organise four tabs:
+        1. Signal Parameters
+        2. Modulation
+        3. Demodulation
+        4. Theory
+    """
+
+    APP_TITLE   = "AM Modulation & Demodulation Simulator"
+    APP_VERSION = "v1.0"
+
+    def __init__(self):
+        super().__init__()
+        self.title(f"{self.APP_TITLE}  {self.APP_VERSION}")
+        self.configure(bg=DARK_BG)
+        self.resizable(True, True)
+        self.minsize(1100, 740)
+
+        # ── Centre on screen ─────────────────────────────────────────────────
+        self.update_idletasks()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h   = 1280, 820
+        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+        # ── Core engine ──────────────────────────────────────────────────────
+        self.engine = SignalEngine()
+
+        # ── Tkinter variables (bound to widgets) ─────────────────────────────
+        self._init_variables()
+
+        # ── Style ─────────────────────────────────────────────────────────────
+        self._configure_ttk_style()
+
+        # ── Layout ───────────────────────────────────────────────────────────
+        self._build_header()
+        self._build_notebook()
+        self._build_status_bar()
+
+        # ── Initial simulation ────────────────────────────────────────────────
+        self.after(200, self.run_simulation)
+
+    # =========================================================================
+    #  Initialisation helpers
+    # =========================================================================
+
+    def _init_variables(self):
+        """Create all tkinter StringVar / DoubleVar controls."""
+        self.var_fm     = tk.DoubleVar(value=500.0)     # Message frequency Hz
+        self.var_fc     = tk.DoubleVar(value=5000.0)    # Carrier frequency Hz
+        self.var_Am     = tk.DoubleVar(value=1.0)       # Message amplitude
+        self.var_Ac     = tk.DoubleVar(value=2.0)       # Carrier amplitude
+        self.var_mu     = tk.DoubleVar(value=0.5)       # Modulation index
+
+        # Computed / display
+        self.var_mu_disp   = tk.StringVar(value="—")
+        self.var_Pt_disp   = tk.StringVar(value="—")
+        self.var_Pc_disp   = tk.StringVar(value="—")
+        self.var_Ps_disp   = tk.StringVar(value="—")
+        self.var_BW_disp   = tk.StringVar(value="—")
+        self.var_status    = tk.StringVar(value="Ready")
+
+        # Cached signals for export
+        self._last_signals: dict = {}
+
+    def _configure_ttk_style(self):
+        """Apply dark-theme styles to all ttk widgets."""
+        style = ttk.Style(self)
+        style.theme_use("clam")
+
+        style.configure(".",
+            background=DARK_BG, foreground=TEXT_PRI,
+            fieldbackground=CARD_BG, troughcolor=CARD_BG,
+            bordercolor=BORDER, darkcolor=BORDER, lightcolor=BORDER,
+            selectbackground=HIGHLIGHT, selectforeground=TEXT_PRI,
+            font=("Segoe UI", 10))
+
+        # Notebook tabs
+        style.configure("TNotebook",
+            background=DARK_BG, bordercolor=BORDER, tabmargins=[4, 4, 0, 0])
+        style.configure("TNotebook.Tab",
+            background=CARD_BG, foreground=TEXT_SEC,
+            padding=[18, 8], font=("Segoe UI", 10, "bold"))
+        style.map("TNotebook.Tab",
+            background=[("selected", HIGHLIGHT)],
+            foreground=[("selected", TEXT_PRI)])
+
+        # LabelFrame
+        style.configure("TLabelframe",
+            background=CARD_BG, bordercolor=BORDER, relief="flat")
+        style.configure("TLabelframe.Label",
+            background=CARD_BG, foreground=ACCENT1,
+            font=("Segoe UI", 10, "bold"))
+
+        # Buttons
+        style.configure("TButton",
+            background=HIGHLIGHT, foreground=TEXT_PRI,
+            relief="flat", padding=[12, 6],
+            font=("Segoe UI", 10, "bold"))
+        style.map("TButton",
+            background=[("active", "#388bfd"), ("pressed", "#1158c7")])
+
+        style.configure("Danger.TButton",
+            background="#da3633", foreground=TEXT_PRI)
+        style.map("Danger.TButton",
+            background=[("active", "#f85149")])
+
+        style.configure("Success.TButton",
+            background="#238636", foreground=TEXT_PRI)
+        style.map("Success.TButton",
+            background=[("active", "#2ea043")])
+
+        # Sliders
+        style.configure("TScale",
+            background=DARK_BG, troughcolor=BORDER,
+            sliderlength=18, sliderrelief="flat")
+
+        # Entry
+        style.configure("TEntry",
+            fieldbackground=CARD_BG, foreground=TEXT_PRI,
+            insertcolor=TEXT_PRI, bordercolor=BORDER)
+
+        # Labels
+        style.configure("Header.TLabel",
+            font=("Segoe UI", 22, "bold"),
+            foreground=ACCENT1, background=DARK_BG)
+        style.configure("Sub.TLabel",
+            font=("Segoe UI", 11),
+            foreground=TEXT_SEC, background=DARK_BG)
+        style.configure("Card.TLabel",
+            background=CARD_BG, foreground=TEXT_PRI)
+        style.configure("Value.TLabel",
+            background=CARD_BG, foreground=ACCENT2,
+            font=("Consolas", 12, "bold"))
+        style.configure("Key.TLabel",
+            background=CARD_BG, foreground=TEXT_SEC,
+            font=("Segoe UI", 10))
+
+    # =========================================================================
+    #  UI Construction
+    # =========================================================================
+
+    def _build_header(self):
+        """Top banner with title and global action buttons."""
+        header = tk.Frame(self, bg=DARK_BG, pady=10)
+        header.pack(fill="x", padx=20)
+
+        # Title block
+        ttk.Label(header, text="⚡  AM Modulation & Demodulation Simulator",
+                  style="Header.TLabel").pack(side="left")
+        ttk.Label(header, text="Electronics & Communication Engineering",
+                  style="Sub.TLabel").pack(side="left", padx=(16, 0), pady=(8, 0))
+
+        # Action buttons (right-aligned)
+        btn_frame = tk.Frame(header, bg=DARK_BG)
+        btn_frame.pack(side="right")
+
+        ttk.Button(btn_frame, text="▶  Run Simulation",
+                   command=self.run_simulation,
+                   style="Success.TButton").pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="↺  Reset",
+                   command=self.reset_defaults,
+                   style="Danger.TButton").pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="💾  Export PNG",
+                   command=self.export_png).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="📄  Save CSV",
+                   command=self.save_csv).pack(side="left", padx=4)
+
+        # Separator
+        sep = tk.Frame(self, bg=BORDER, height=1)
+        sep.pack(fill="x", padx=0)
+
+    def _build_notebook(self):
+        """Create the four-tab Notebook."""
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # ── Tab 1 : Signal Parameters ─────────────────────────────────────────
+        self.tab_params = tk.Frame(self.nb, bg=DARK_BG)
+        self.nb.add(self.tab_params, text="  ① Signal Parameters  ")
+        self._build_params_tab(self.tab_params)
+
+        # ── Tab 2 : Modulation ────────────────────────────────────────────────
+        self.tab_mod = tk.Frame(self.nb, bg=DARK_BG)
+        self.nb.add(self.tab_mod, text="  ② Modulation  ")
+        self._build_modulation_tab(self.tab_mod)
+
+        # ── Tab 3 : Demodulation ──────────────────────────────────────────────
+        self.tab_demod = tk.Frame(self.nb, bg=DARK_BG)
+        self.nb.add(self.tab_demod, text="  ③ Demodulation  ")
+        self._build_demodulation_tab(self.tab_demod)
+
+        # ── Tab 4 : Theory ────────────────────────────────────────────────────
+        self.tab_theory = tk.Frame(self.nb, bg=DARK_BG)
+        self.nb.add(self.tab_theory, text="  ④ Theory  ")
+        self._build_theory_tab(self.tab_theory)
+
+    # ── Tab 1 helpers ─────────────────────────────────────────────────────────
+
+    def _build_params_tab(self, parent):
+        """Parameters form + sliders + analysis panel."""
+        # Two-column layout: left = entry form, right = analysis
+        left  = tk.Frame(parent, bg=DARK_BG)
+        right = tk.Frame(parent, bg=DARK_BG)
+        left.pack(side="left", fill="both", expand=False, padx=12, pady=12)
+        right.pack(side="left", fill="both", expand=True, padx=12, pady=12)
+
+        # ─ Entry form ────────────────────────────────────────────────────────
+        ef = ttk.LabelFrame(left, text=" 🔧  Signal Parameters ", padding=14)
+        ef.pack(fill="x", pady=(0, 12))
+
+        rows = [
+            ("Message Frequency  fm (Hz)",  self.var_fm,  1.0,    2000.0),
+            ("Carrier Frequency  fc (Hz)",   self.var_fc,  500.0,  20000.0),
+            ("Message Amplitude  Am",        self.var_Am,  0.1,    5.0),
+            ("Carrier Amplitude  Ac",        self.var_Ac,  0.1,    5.0),
+            ("Modulation Index  μ",          self.var_mu,  0.01,   1.0),
+        ]
+        self._entries = {}
+        for r, (label, var, lo, hi) in enumerate(rows):
+            tk.Label(ef, text=label, bg=CARD_BG, fg=TEXT_SEC,
+                     font=("Segoe UI", 10), anchor="w").grid(
+                         row=r, column=0, sticky="w", pady=5, padx=(0, 16))
+            entry = tk.Entry(ef, textvariable=var, width=10,
+                             bg=CARD_BG, fg=TEXT_PRI, insertbackground=TEXT_PRI,
+                             relief="flat", font=("Consolas", 11),
+                             highlightthickness=1, highlightcolor=ACCENT1,
+                             highlightbackground=BORDER)
+            entry.grid(row=r, column=1, sticky="ew", pady=5)
+            self._entries[label] = (entry, lo, hi)
+
+        ef.columnconfigure(1, weight=1)
+
+        # ─ Interactive sliders ───────────────────────────────────────────────
+        sf = ttk.LabelFrame(left, text=" 🎚  Interactive Sliders ", padding=14)
+        sf.pack(fill="x", pady=(0, 12))
+
+        slider_defs = [
+            ("Carrier Freq fc (Hz)",  self.var_fc,  500,  20000, 100),
+            ("Message Freq fm (Hz)",  self.var_fm,  1,    2000,  1),
+            ("Modulation Index μ",    self.var_mu,  0.01, 1.0,   0.01),
+        ]
+        for label, var, lo, hi, res in slider_defs:
+            row_f = tk.Frame(sf, bg=CARD_BG)
+            row_f.pack(fill="x", pady=4)
+            tk.Label(row_f, text=label, bg=CARD_BG, fg=TEXT_SEC,
+                     font=("Segoe UI", 9), width=22, anchor="w").pack(side="left")
+            sl = tk.Scale(row_f, variable=var, from_=lo, to=hi,
+                          resolution=res, orient="horizontal",
+                          bg=CARD_BG, fg=TEXT_PRI, troughcolor=BORDER,
+                          highlightthickness=0, activebackground=ACCENT1,
+                          sliderlength=16, length=240,
+                          command=lambda _e: self._on_slider_change())
+            sl.pack(side="left", padx=8)
+            val_lbl = tk.Label(row_f, textvariable=var,
+                               bg=CARD_BG, fg=ACCENT2,
+                               font=("Consolas", 10), width=8)
+            val_lbl.pack(side="left")
+
+        # ─ Analysis panel ─────────────────────────────────────────────────────
+        af = ttk.LabelFrame(right, text=" 📊  Signal Analysis ", padding=16)
+        af.pack(fill="both", expand=True)
+
+        metrics = [
+            ("Modulation Index  μ",    self.var_mu_disp),
+            ("Total Power  Pt  (W)",   self.var_Pt_disp),
+            ("Carrier Power  Pc  (W)", self.var_Pc_disp),
+            ("Sideband Power  Ps (W)", self.var_Ps_disp),
+            ("Bandwidth  BW = 2·fm",   self.var_BW_disp),
         ]
 
-        defaults = [1, 5, 100, 1000, 0.8]
+        for i, (key, svar) in enumerate(metrics):
+            row_f = tk.Frame(af, bg=CARD_BG, pady=4)
+            row_f.pack(fill="x")
+            tk.Label(row_f, text=key, bg=CARD_BG, fg=TEXT_SEC,
+                     font=("Segoe UI", 10), anchor="w", width=28).pack(side="left")
+            tk.Label(row_f, textvariable=svar, bg=CARD_BG, fg=ACCENT2,
+                     font=("Consolas", 12, "bold"), anchor="e").pack(side="right", padx=8)
+            # Separator line
+            sep = tk.Frame(af, bg=BORDER, height=1)
+            sep.pack(fill="x", pady=2)
 
-        self.entries = []
+        # Equation image
+        eq_lbl = tk.Label(af,
+            text="s(t) = Ac · [1 + μ·cos(2π·fm·t)] · cos(2π·fc·t)",
+            bg=CARD_BG, fg=ACCENT4,
+            font=("Consolas", 11, "italic"), pady=18)
+        eq_lbl.pack(fill="x")
 
-        for i, label in enumerate(labels):
-            ttk.Label(frame, text=label).grid(row=i, column=0, padx=10, pady=5)
+    # ── Tab 2 helpers ─────────────────────────────────────────────────────────
 
-            entry = ttk.Entry(frame, width=15)
-            entry.insert(0, str(defaults[i]))
-            entry.grid(row=i, column=1)
+    def _build_modulation_tab(self, parent):
+        """Three stacked plot canvases for message / carrier / AM signal."""
+        self.fig_mod = Figure(figsize=(12, 7), tight_layout=True)
+        self.ax_msg  = self.fig_mod.add_subplot(3, 1, 1)
+        self.ax_car  = self.fig_mod.add_subplot(3, 1, 2)
+        self.ax_am   = self.fig_mod.add_subplot(3, 1, 3)
 
-            self.entries.append(entry)
+        self.canvas_mod = FigureCanvasTkAgg(self.fig_mod, master=parent)
+        self.canvas_mod.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
 
-        button_frame = ttk.Frame(self.root)
-        button_frame.pack(pady=20)
+        toolbar_frame = tk.Frame(parent, bg=DARK_BG)
+        toolbar_frame.pack(fill="x")
+        NavigationToolbar2Tk(self.canvas_mod, toolbar_frame)
 
-        ttk.Button(
-            button_frame,
-            text="Generate & Plot",
-            command=self.run_simulation
-        ).grid(row=0, column=0, padx=10)
+    # ── Tab 3 helpers ─────────────────────────────────────────────────────────
 
-        ttk.Button(
-            button_frame,
-            text="FFT Analysis",
-            command=self.plot_fft
-        ).grid(row=0, column=1, padx=10)
+    def _build_demodulation_tab(self, parent):
+        """Three stacked plot canvases for demodulation."""
+        self.fig_demod  = Figure(figsize=(12, 7), tight_layout=True)
+        self.ax_am_d    = self.fig_demod.add_subplot(3, 1, 1)
+        self.ax_env     = self.fig_demod.add_subplot(3, 1, 2)
+        self.ax_rec     = self.fig_demod.add_subplot(3, 1, 3)
 
-        ttk.Button(
-            button_frame,
-            text="Save CSV",
-            command=self.save_csv
-        ).grid(row=0, column=2, padx=10)
+        self.canvas_demod = FigureCanvasTkAgg(self.fig_demod, master=parent)
+        self.canvas_demod.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
 
-        ttk.Button(
-            button_frame,
-            text="Exit",
-            command=self.root.quit
-        ).grid(row=0, column=3, padx=10)
+        toolbar_frame = tk.Frame(parent, bg=DARK_BG)
+        toolbar_frame.pack(fill="x")
+        NavigationToolbar2Tk(self.canvas_demod, toolbar_frame)
 
-        self.result_label = tk.Label(
-            self.root,
-            text="",
-            font=("Arial", 11)
-        )
-        self.result_label.pack(pady=10)
+    # ── Tab 4 helpers ─────────────────────────────────────────────────────────
 
-        self.t = None
-        self.message = None
-        self.carrier = None
-        self.am_signal = None
-        self.recovered = None
+    def _build_theory_tab(self, parent):
+        """Scrollable theory text with styled sections."""
+        canvas = tk.Canvas(parent, bg=DARK_BG, highlightthickness=0)
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
 
-    def get_values(self):
+        inner = tk.Frame(canvas, bg=DARK_BG)
+        win   = canvas.create_window((0, 0), window=inner, anchor="nw")
 
-        Am = float(self.entries[0].get())
-        Ac = float(self.entries[1].get())
-        fm = float(self.entries[2].get())
-        fc = float(self.entries[3].get())
-        mu = float(self.entries[4].get())
+        def _resize(e):
+            canvas.itemconfig(win, width=e.width)
+        canvas.bind("<Configure>", _resize)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
-        return Am, Ac, fm, fc, mu
+        # Mouse-wheel scroll
+        canvas.bind_all("<MouseWheel>",
+                        lambda e: canvas.yview_scroll(-1*(e.delta//120), "units"))
+
+        # ── Content ──────────────────────────────────────────────────────────
+        sections = [
+            ("📡  Amplitude Modulation – Theory",
+             "Amplitude Modulation (AM) is a modulation technique used in electronic "
+             "communication, most commonly for transmitting information via a radio carrier "
+             "wave. In AM, the amplitude of the carrier wave is varied in proportion to the "
+             "waveform being transmitted."),
+
+            ("📐  AM Equation",
+             "s(t)  =  Ac · [1 + μ · cos(2π·fm·t)] · cos(2π·fc·t)\n\n"
+             "  s(t)  →  AM modulated signal\n"
+             "  Ac    →  Carrier amplitude\n"
+             "  μ     →  Modulation index  (0 ≤ μ ≤ 1)\n"
+             "  fm    →  Message (modulating) signal frequency\n"
+             "  fc    →  Carrier signal frequency"),
+
+            ("📶  Carrier Signal",
+             "c(t) = Ac · cos(2π·fc·t)\n\n"
+             "The carrier is a high-frequency sinusoid whose amplitude, frequency, or phase "
+             "is altered by the message signal. In AM, only the amplitude is varied. A typical "
+             "carrier might be in the MHz range for commercial radio."),
+
+            ("🎵  Message Signal",
+             "m(t) = Am · cos(2π·fm·t)\n\n"
+             "The message (modulating) signal carries the information to be transmitted. It "
+             "is generally a low-frequency signal — for audio, typically 20 Hz – 20 kHz."),
+
+            ("📊  Modulation Index  μ",
+             "μ  =  Am / Ac\n\n"
+             "• 0  < μ < 1  →  Under-modulation  (normal, no distortion)\n"
+             "• μ = 1       →  Full modulation     (maximum efficiency without distortion)\n"
+             "• μ > 1       →  Over-modulation     (causes distortion and envelope inversion)\n\n"
+             "Efficiency  η  =  μ² / (2 + μ²)  ×  100 %\n"
+             "At μ = 1, maximum efficiency = 33.3 %"),
+
+            ("📡  Sidebands & Bandwidth",
+             "Expanding the AM equation yields three frequency components:\n\n"
+             "  1) Carrier        :  fc          (amplitude = Ac)\n"
+             "  2) Upper Sideband :  fc + fm     (amplitude = μ·Ac / 2)\n"
+             "  3) Lower Sideband :  fc − fm     (amplitude = μ·Ac / 2)\n\n"
+             "Bandwidth  BW  =  2 × fm\n\n"
+             "All information is contained in the sidebands. The carrier carries no "
+             "information but consumes significant power."),
+
+            ("⚡  Power Relations",
+             "Carrier Power    Pc  =  Ac² / 2\n"
+             "Sideband Power   Ps  =  (μ²/2) · Pc       (total of both sidebands)\n"
+             "Total Power      Pt  =  Pc · (1 + μ²/2)\n\n"
+             "Power efficiency  =  Ps / Pt  ×  100 %"),
+
+            ("🔍  Envelope Detection (Demodulation)",
+             "Envelope detection is the simplest AM demodulation method:\n\n"
+             "Step 1 — Rectification\n"
+             "   Pass the AM signal through a diode (full-wave or half-wave rectifier) "
+             "to obtain  |s(t)|.\n\n"
+             "Step 2 — Low-Pass Filtering\n"
+             "   Apply a low-pass filter (RC circuit or Butterworth) with cutoff just "
+             "above the highest message frequency to smooth the rectified signal.\n"
+             "   This yields the envelope  e(t) ≈ Ac · [1 + μ·m_n(t)]\n\n"
+             "Step 3 — DC Removal\n"
+             "   Remove the DC component (Ac) to recover  m(t).\n\n"
+             "Requirement: The carrier frequency must be much greater than the message "
+             "frequency (fc >> fm) for accurate envelope detection."),
+
+            ("💡  Applications",
+             "• AM Radio Broadcasting (535 – 1605 kHz)\n"
+             "• Aircraft navigation and VHF/UHF communications\n"
+             "• Single-Sideband (SSB) modulation (variant of AM)\n"
+             "• Quadrature Amplitude Modulation (QAM) used in modern digital comms\n"
+             "• Medical ultrasound imaging (pulse AM)\n"
+             "• TV picture transmission (vestigial sideband AM)"),
+        ]
+
+        for title, body in sections:
+            # Section card
+            card = tk.Frame(inner, bg=CARD_BG, padx=20, pady=14,
+                            highlightthickness=1, highlightbackground=BORDER)
+            card.pack(fill="x", padx=20, pady=8)
+
+            tk.Label(card, text=title, bg=CARD_BG, fg=ACCENT1,
+                     font=("Segoe UI", 13, "bold"), anchor="w").pack(fill="x")
+
+            # Separator
+            tk.Frame(card, bg=BORDER, height=1).pack(fill="x", pady=(6, 10))
+
+            tk.Label(card, text=body, bg=CARD_BG, fg=TEXT_PRI,
+                     font=("Consolas", 10), justify="left", anchor="w",
+                     wraplength=900).pack(fill="x")
+
+    # ── Status bar ─────────────────────────────────────────────────────────────
+
+    def _build_status_bar(self):
+        bar = tk.Frame(self, bg=CARD_BG, height=28)
+        bar.pack(fill="x", side="bottom")
+        bar.pack_propagate(False)
+        tk.Label(bar, textvariable=self.var_status,
+                 bg=CARD_BG, fg=TEXT_SEC,
+                 font=("Segoe UI", 9), anchor="w",
+                 padx=12).pack(side="left", fill="y")
+        tk.Label(bar, text="AM Simulator  |  ECE Dept",
+                 bg=CARD_BG, fg=TEXT_SEC,
+                 font=("Segoe UI", 9), anchor="e",
+                 padx=12).pack(side="right", fill="y")
+
+    # =========================================================================
+    #  Simulation logic
+    # =========================================================================
+
+    def _read_params(self):
+        """
+        Read and validate all parameter variables.
+        Returns (fm, fc, Am, Ac, mu) or raises ValueError with a message.
+        """
+        fm  = float(self.var_fm.get())
+        fc  = float(self.var_fc.get())
+        Am  = float(self.var_Am.get())
+        Ac  = float(self.var_Ac.get())
+        mu  = float(self.var_mu.get())
+
+        if fm <= 0:
+            raise ValueError("Message frequency fm must be > 0 Hz.")
+        if fc <= 0:
+            raise ValueError("Carrier frequency fc must be > 0 Hz.")
+        if fc <= fm:
+            raise ValueError("Carrier frequency fc must be greater than fm.")
+        if Am <= 0:
+            raise ValueError("Message amplitude Am must be > 0.")
+        if Ac <= 0:
+            raise ValueError("Carrier amplitude Ac must be > 0.")
+        if not (0.01 <= mu <= 1.0):
+            raise ValueError("Modulation index μ must be between 0.01 and 1.0.")
+
+        return fm, fc, Am, Ac, mu
 
     def run_simulation(self):
+        """Main entry-point: compute signals and refresh all plots."""
+        try:
+            fm, fc, Am, Ac, mu = self._read_params()
+        except ValueError as exc:
+            messagebox.showerror("Input Error", str(exc))
+            self.var_status.set(f"❌  Error: {exc}")
+            return
+
+        self.var_status.set("⚙  Computing signals …")
+        self.update_idletasks()
 
         try:
+            t   = self.engine.t
+            msg = self.engine.message_signal(Am, fm)
+            car = self.engine.carrier_signal(Ac, fc)
+            am  = self.engine.am_signal(Am, Ac, fm, fc, mu)
+            env = self.engine.envelope_detect(am, fc)
+            rec = self.engine.recovered_message(env)
 
-            Am, Ac, fm, fc, mu = self.get_values()
+            # Cache for export
+            self._last_signals = {
+                "t": t, "message": msg, "carrier": car,
+                "am": am, "envelope": env, "recovered": rec,
+                "fm": fm, "fc": fc, "Am": Am, "Ac": Ac, "mu": mu,
+            }
 
-            self.t, self.message, self.carrier, self.am_signal = \
-                generate_am_signal(Am, Ac, fm, fc, mu)
+            # Update plots
+            self._plot_modulation(t, msg, car, am, fm, fc, mu)
+            self._plot_demodulation(t, am, env, rec, fm, fc)
 
-            envelope, self.recovered = demodulate_signal(self.am_signal)
+            # Update analysis panel
+            Pt, Pc, Ps = self.engine.compute_power(Ac, mu)
+            BW = 2 * fm
+            self.var_mu_disp.set(f"{mu:.4f}")
+            self.var_Pt_disp.set(f"{Pt:.4f} W")
+            self.var_Pc_disp.set(f"{Pc:.4f} W")
+            self.var_Ps_disp.set(f"{Ps:.4f} W")
+            self.var_BW_disp.set(f"{BW:.2f} Hz")
 
-            bandwidth = 2 * fm
-
-            self.result_label.config(
-                text=f"Bandwidth = {bandwidth:.2f} Hz"
+            eff = (Ps / Pt * 100) if Pt > 0 else 0
+            self.var_status.set(
+                f"✅  Simulation complete  |  fc = {fc:.0f} Hz  "
+                f"|  fm = {fm:.0f} Hz  |  μ = {mu:.3f}  "
+                f"|  Efficiency = {eff:.1f} %  |  BW = {BW:.0f} Hz"
             )
 
-            fig, axs = plt.subplots(4, 1, figsize=(10, 8))
+        except Exception as exc:
+            messagebox.showerror("Simulation Error",
+                                 f"An unexpected error occurred:\n\n{exc}\n\n"
+                                 f"{traceback.format_exc()}")
+            self.var_status.set(f"❌  Simulation failed: {exc}")
 
-            axs[0].plot(self.t, self.message)
-            axs[0].set_title("Message Signal")
+    # ── Plotting helpers ───────────────────────────────────────────────────────
 
-            axs[1].plot(self.t, self.carrier)
-            axs[1].set_title("Carrier Signal")
+    def _style_ax(self, ax, title, xlabel, ylabel):
+        """Apply consistent engineering-grade axis styling."""
+        ax.set_title(title, fontsize=11, fontweight="bold", pad=8)
+        ax.set_xlabel(xlabel, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.grid(True, linestyle="--", alpha=0.4, color="#21262d")
+        ax.tick_params(colors=TEXT_SEC, labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(BORDER)
 
-            axs[2].plot(self.t, self.am_signal)
-            axs[2].set_title("AM Modulated Signal")
+    def _plot_modulation(self, t, msg, car, am, fm, fc, mu):
+        """Refresh the three modulation axes."""
+        t_ms = t * 1e3          # convert to milliseconds for display
 
-            axs[3].plot(self.t, self.recovered)
-            axs[3].set_title("Recovered Signal")
+        # ── Message signal ───────────────────────────────────────────────────
+        self.ax_msg.cla()
+        self.ax_msg.plot(t_ms, msg, color=ACCENT2, linewidth=1.4,
+                         label=f"m(t)  fm = {fm:.0f} Hz")
+        self._style_ax(self.ax_msg,
+                       "Message Signal  m(t) = Am·cos(2π·fm·t)",
+                       "Time (ms)", "Amplitude (V)")
+        self.ax_msg.legend(loc="upper right", fontsize=8)
+        self.ax_msg.set_facecolor("#0d1117")
 
-            for ax in axs:
-                ax.grid(True)
+        # ── Carrier signal ───────────────────────────────────────────────────
+        self.ax_car.cla()
+        self.ax_car.plot(t_ms, car, color=ACCENT1, linewidth=1.2,
+                         label=f"c(t)  fc = {fc:.0f} Hz")
+        self._style_ax(self.ax_car,
+                       "Carrier Signal  c(t) = Ac·cos(2π·fc·t)",
+                       "Time (ms)", "Amplitude (V)")
+        self.ax_car.legend(loc="upper right", fontsize=8)
+        self.ax_car.set_facecolor("#0d1117")
 
-            plt.tight_layout()
-            plt.show()
+        # ── AM modulated signal ──────────────────────────────────────────────
+        self.ax_am.cla()
+        self.ax_am.plot(t_ms, am, color=ACCENT3, linewidth=1.4,
+                        label=f"s(t)  μ = {mu:.2f}")
+        # Overlay envelope outline
+        env_approx = np.max(np.abs(am)) * (1 + mu * np.cos(2*np.pi*fm*t)) / (1 + mu)
+        self.ax_am.plot(t_ms, env_approx, "--",
+                        color=ACCENT4, linewidth=1.0, alpha=0.7, label="Envelope ±")
+        self.ax_am.plot(t_ms, -env_approx, "--",
+                        color=ACCENT4, linewidth=1.0, alpha=0.7)
+        self._style_ax(self.ax_am,
+                       "AM Modulated Signal  s(t) = Ac·[1+μ·cos(2π·fm·t)]·cos(2π·fc·t)",
+                       "Time (ms)", "Amplitude (V)")
+        self.ax_am.legend(loc="upper right", fontsize=8)
+        self.ax_am.set_facecolor("#0d1117")
 
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+        self.fig_mod.tight_layout(pad=1.5)
+        self.canvas_mod.draw_idle()
 
-    def plot_fft(self):
+    def _plot_demodulation(self, t, am, env, rec, fm, fc):
+        """Refresh the three demodulation axes."""
+        t_ms = t * 1e3
 
-        if self.am_signal is None:
-            messagebox.showwarning(
-                "Warning",
-                "Generate signal first!"
-            )
+        # ── AM signal ─────────────────────────────────────────────────────────
+        self.ax_am_d.cla()
+        self.ax_am_d.plot(t_ms, am, color=ACCENT3, linewidth=1.3,
+                          label="AM Signal  s(t)")
+        self._style_ax(self.ax_am_d,
+                       "Input AM Signal",
+                       "Time (ms)", "Amplitude (V)")
+        self.ax_am_d.legend(loc="upper right", fontsize=8)
+        self.ax_am_d.set_facecolor("#0d1117")
+
+        # ── Detected envelope ─────────────────────────────────────────────────
+        self.ax_env.cla()
+        self.ax_env.plot(t_ms, env, color=ACCENT1, linewidth=1.5,
+                         label="Detected Envelope  e(t)")
+        self.ax_env.fill_between(t_ms, env, alpha=0.12, color=ACCENT1)
+        self._style_ax(self.ax_env,
+                       "Detected Envelope  (Rectify + LPF)",
+                       "Time (ms)", "Amplitude (V)")
+        self.ax_env.legend(loc="upper right", fontsize=8)
+        self.ax_env.set_facecolor("#0d1117")
+
+        # ── Recovered message ─────────────────────────────────────────────────
+        self.ax_rec.cla()
+        self.ax_rec.plot(t_ms, rec, color=ACCENT4, linewidth=1.5,
+                         label=f"Recovered m(t)  fm ≈ {fm:.0f} Hz")
+        self.ax_rec.fill_between(t_ms, rec, alpha=0.10, color=ACCENT4)
+        self._style_ax(self.ax_rec,
+                       "Recovered Message Signal  (After DC Removal)",
+                       "Time (ms)", "Amplitude (V)")
+        self.ax_rec.legend(loc="upper right", fontsize=8)
+        self.ax_rec.set_facecolor("#0d1117")
+
+        self.fig_demod.tight_layout(pad=1.5)
+        self.canvas_demod.draw_idle()
+
+    # ── Slider callback ─────────────────────────────────────────────────────
+
+    def _on_slider_change(self):
+        """Debounced slider update – re-runs simulation after 150 ms."""
+        try:
+            self._slider_job
+        except AttributeError:
+            self._slider_job = None
+
+        if self._slider_job is not None:
+            self.after_cancel(self._slider_job)
+        self._slider_job = self.after(150, self.run_simulation)
+
+    # =========================================================================
+    #  Actions: Reset / Export
+    # =========================================================================
+
+    def reset_defaults(self):
+        """Restore all parameters to sensible defaults."""
+        self.var_fm.set(500.0)
+        self.var_fc.set(5000.0)
+        self.var_Am.set(1.0)
+        self.var_Ac.set(2.0)
+        self.var_mu.set(0.5)
+        self.var_status.set("↺  Parameters reset to defaults.")
+        self.run_simulation()
+
+    def export_png(self):
+        """Save both modulation and demodulation figures as PNG files."""
+        if not self._last_signals:
+            messagebox.showwarning("No Data", "Run the simulation first.")
             return
 
-        fs = len(self.t) / (self.t[-1] - self.t[0])
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG Image", "*.png")],
+            title="Save Modulation Plot As …",
+            initialfile="am_modulation")
 
-        freq, mag = compute_fft(self.am_signal, fs)
+        if not path:
+            return
 
-        plt.figure(figsize=(10, 5))
-        plt.plot(freq, mag)
-        plt.title("FFT Spectrum of AM Signal")
-        plt.xlabel("Frequency (Hz)")
-        plt.ylabel("Magnitude")
-        plt.grid(True)
-        plt.show()
+        base, ext = os.path.splitext(path)
+        try:
+            self.fig_mod.savefig(path, dpi=150, bbox_inches="tight",
+                                 facecolor=CARD_BG)
+            demod_path = base + "_demodulation" + ext
+            self.fig_demod.savefig(demod_path, dpi=150, bbox_inches="tight",
+                                   facecolor=CARD_BG)
+            messagebox.showinfo("Export Successful",
+                                f"Plots saved:\n• {path}\n• {demod_path}")
+            self.var_status.set(f"💾  Plots exported to {os.path.dirname(path)}")
+        except Exception as exc:
+            messagebox.showerror("Export Error", str(exc))
 
     def save_csv(self):
-
-        if self.am_signal is None:
-            messagebox.showwarning(
-                "Warning",
-                "Generate signal first!"
-            )
+        """Export all signal arrays to a CSV file."""
+        if not self._last_signals:
+            messagebox.showwarning("No Data", "Run the simulation first.")
             return
 
-        filename = filedialog.asksaveasfilename(
+        path = filedialog.asksaveasfilename(
             defaultextension=".csv",
-            filetypes=[("CSV Files", "*.csv")]
-        )
+            filetypes=[("CSV File", "*.csv")],
+            title="Save Signal Data As …",
+            initialfile="am_signals")
 
-        if not filename:
+        if not path:
             return
 
-        with open(filename, "w", newline="") as f:
+        sigs = self._last_signals
+        try:
+            with open(path, "w", newline="") as f:
+                writer = csv.writer(f)
+                # Header with parameters
+                writer.writerow(["# AM Simulator – Signal Data"])
+                writer.writerow([f"# fm={sigs['fm']} Hz",
+                                  f"fc={sigs['fc']} Hz",
+                                  f"Am={sigs['Am']}",
+                                  f"Ac={sigs['Ac']}",
+                                  f"mu={sigs['mu']}"])
+                writer.writerow([])
+                writer.writerow(["Time (s)", "Message (V)", "Carrier (V)",
+                                  "AM Signal (V)", "Envelope (V)",
+                                  "Recovered (V)"])
+                for i in range(len(sigs["t"])):
+                    writer.writerow([
+                        f"{sigs['t'][i]:.8f}",
+                        f"{sigs['message'][i]:.6f}",
+                        f"{sigs['carrier'][i]:.6f}",
+                        f"{sigs['am'][i]:.6f}",
+                        f"{sigs['envelope'][i]:.6f}",
+                        f"{sigs['recovered'][i]:.6f}",
+                    ])
+            messagebox.showinfo("Export Successful",
+                                f"Signal data saved to:\n{path}")
+            self.var_status.set(f"📄  CSV saved to {path}")
+        except Exception as exc:
+            messagebox.showerror("CSV Error", str(exc))
 
-            writer = csv.writer(f)
 
-            writer.writerow(
-                ["Time", "Message", "Carrier",
-                 "AM Signal", "Recovered"]
-            )
-
-            for i in range(len(self.t)):
-                writer.writerow([
-                    self.t[i],
-                    self.message[i],
-                    self.carrier[i],
-                    self.am_signal[i],
-                    self.recovered[i]
-                ])
-
-        messagebox.showinfo(
-            "Saved",
-            "Signal data saved successfully!"
-        )
-
-
-# -----------------------------
-# Main
-# -----------------------------
-
+# ─────────────────────────────────────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = AMSimulator(root)
-    root.mainloop()
+    app = AMSimulator()
+    app.mainloop()
